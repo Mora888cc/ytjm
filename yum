@@ -1,0 +1,412 @@
+local Players    = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS        = game:GetService("UserInputService")
+local Workspace  = game:GetService("Workspace")
+
+local LP     = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+-- ======================== CONFIG =============================
+local CFG = {
+    esp = {
+        enabled = true, box = true, fill = false, name = true,
+        health = true, distance = true, tracer = false,
+        teamCheck = true, maxDist = 1500,
+        color = Color3.fromRGB(255, 60, 60), alpha = 0.18,
+    },
+    chams = {
+        enabled = true, fill = Color3.fromRGB(255, 0, 0),
+        outline = Color3.fromRGB(255, 255, 255),
+        transparency = 0.55, alwaysOnTop = true,
+    },
+    aim = {
+        enabled = true, silent = true, fov = 140, smooth = 0.35,
+        part = "Head", wallCheck = true, holdMode = true,
+        toggleKey = Enum.KeyCode.Q,
+    },
+    visual = { fovCircle = true, fovColor = Color3.fromRGB(255, 255, 255) },
+    menu   = { x = 24, y = 140, w = 176, open = true, yOffset = 0 },
+}
+
+-- ======================== STATE ==============================
+local Cache     = {}
+local AimOn     = CFG.esp and CFG.aim.enabled
+local EspOn     = CFG.esp.enabled
+local ChamsOn   = CFG.chams.enabled
+local FovOn     = CFG.visual.fovCircle
+local AimTarget = nil
+
+-- ======================== DRAW HELPERS =======================
+local function newD(class, props)
+    local ok, o = pcall(function() return Drawing.new(class) end)
+    if not ok or not o then return nil end
+    for k, v in pairs(props or {}) do o[k] = v end
+    return o
+end
+
+local function removeD(o)
+    if o and o.Remove then pcall(o.Remove, o) end
+end
+
+local function w2s(pos)
+    local sp, on = Camera:WorldToViewportPoint(pos)
+    return Vector2.new(sp.X, sp.Y), on and sp.Z > 0, sp.Z
+end
+
+-- ======================== ENTITY HELPERS =====================
+local function getChar(plr)
+    local ch = plr.Character
+    if not ch then return end
+    local hum  = ch:FindFirstChildOfClass("Humanoid")
+    local hrp  = ch:FindFirstChild("HumanoidRootPart")
+    local head = ch:FindFirstChild("Head")
+    if not (hum and hrp and head) then return end
+    if hum.Health <= 0 then return end
+    return ch, hum, hrp, head
+end
+
+local function isEnemy(plr)
+    if plr == LP then return false end
+    if plr.Character == nil then return false end
+    if CFG.esp.teamCheck and LP.Team and plr.Team and plr.Team == LP.Team then
+        return false
+    end
+    return true
+end
+
+local function distTo(plr)
+    local ch = plr.Character
+    if not ch or not ch:FindFirstChild("HumanoidRootPart") then return math.huge end
+    local p = ch.HumanoidRootPart.Position
+    if LP.Character and LP.Character:FindFirstChild("HumanoidRootPart") then
+        return (p - LP.Character.HumanoidRootPart.Position).Magnitude
+    end
+    return (p - Camera.CFrame.Position).Magnitude
+end
+
+local function hasLOS(part)
+    if not CFG.aim.wallCheck then return true end
+    local origin = Camera.CFrame.Position
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { LP.Character, Camera }
+    local res = Workspace:Raycast(origin, part.Position - origin, params)
+    return res == nil or res.Instance:IsDescendantOf(part.Parent)
+end
+
+-- ======================== ESP ================================
+local function buildEsp(plr)
+    local e = Cache[plr] or {}
+    e.box     = e.box     or newD("Square", { Thickness = 1, Filled = false })
+    e.boxFill = e.boxFill or newD("Square", { Thickness = 0, Filled = true })
+    e.hpBack  = e.hpBack  or newD("Square", { Thickness = 0, Filled = true, Color = Color3.fromRGB(12,12,12) })
+    e.hpFill  = e.hpFill  or newD("Square", { Thickness = 0, Filled = true })
+    e.name    = e.name    or newD("Text",   { Size = 14, Center = true, Outline = true, OutlineColor = Color3.new(0,0,0) })
+    e.dist    = e.dist    or newD("Text",   { Size = 13, Center = true, Outline = true, OutlineColor = Color3.new(0,0,0) })
+    e.tracer  = e.tracer  or newD("Line",   { Thickness = 1 })
+    Cache[plr] = e
+    return e
+end
+
+local function destroyEsp(plr)
+    local e = Cache[plr]
+    if not e then return end
+    for _, o in pairs(e) do removeD(o) end
+    if e.hl then pcall(function() e.hl:Destroy() end) end
+    Cache[plr] = nil
+end
+
+local function hideAll(e)
+    for k, o in pairs(e) do
+        if k ~= "hl" and o and o.Visible ~= nil then o.Visible = false end
+    end
+end
+
+local function updateEsp(plr)
+    if plr == LP then return end
+    local e = Cache[plr]
+    if not e then return end
+
+    local ch, hum, hrp, head = getChar(plr)
+    if not (ch and EspOn and isEnemy(plr) and distTo(plr) <= CFG.esp.maxDist) then
+        hideAll(e)
+        if e.hl then pcall(function() e.hl:Destroy() end); e.hl = nil end
+        return
+    end
+
+    local st, vt = w2s(head.Position + Vector3.new(0, 0.6, 0))
+    local sb, vb = w2s(hrp.Position - Vector3.new(0, 2.8, 0))
+    if not (vt and vb) then
+        hideAll(e)
+        return
+    end
+
+    local h = math.abs(sb.Y - st.Y)
+    local w = h * 0.55
+    local x, y = st.X - w / 2, st.Y
+
+    e.box.Visible  = CFG.esp.box
+    e.box.Color    = CFG.esp.color
+    e.box.Position = Vector2.new(x, y)
+    e.box.Size     = Vector2.new(w, h)
+
+    e.boxFill.Visible      = CFG.esp.box and CFG.esp.fill
+    e.boxFill.Color        = CFG.esp.color
+    e.boxFill.Transparency = 1 - CFG.esp.alpha
+    e.boxFill.Position     = Vector2.new(x, y)
+    e.boxFill.Size         = Vector2.new(w, h)
+
+    e.name.Visible  = CFG.esp.name
+    e.name.Color    = CFG.esp.color
+    e.name.Position = Vector2.new(st.X, y - 18)
+    e.name.Text     = plr.Name
+
+    e.dist.Visible  = CFG.esp.distance
+    e.dist.Color    = CFG.esp.color
+    e.dist.Position = Vector2.new(st.X, y + h + 4)
+    e.dist.Text     = string.format("%d m", math.floor(distTo(plr) / 3))
+
+    local hp = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
+    e.hpBack.Visible  = CFG.esp.health
+    e.hpBack.Position = Vector2.new(x - 6, y)
+    e.hpBack.Size     = Vector2.new(3, h)
+
+    e.hpFill.Visible  = CFG.esp.health
+    e.hpFill.Color    = Color3.fromRGB(255 * (1 - hp), 255 * hp, 0)
+    e.hpFill.Position = Vector2.new(x - 6, y + h * (1 - hp))
+    e.hpFill.Size     = Vector2.new(3, h * hp)
+
+    e.tracer.Visible = CFG.esp.tracer
+    e.tracer.Color   = CFG.esp.color
+    e.tracer.From    = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y)
+    e.tracer.To      = Vector2.new(st.X, y + h)
+
+    -- chams
+    if ChamsOn then
+        if e.hl and e.hl.Adornee ~= ch then
+            pcall(function() e.hl:Destroy() end); e.hl = nil
+        end
+        if not e.hl then
+            local hl = Instance.new("Highlight")
+            hl.FillColor        = CFG.chams.fill
+            hl.OutlineColor     = CFG.chams.outline
+            hl.FillTransparency = CFG.chams.transparency
+            hl.OutlineTransparency = 0
+            hl.DepthMode = CFG.chams.alwaysOnTop
+                and Enum.HighlightDepthMode.AlwaysOnTop
+                or  Enum.HighlightDepthMode.Occluded
+            hl.Adornee = ch
+            hl.Parent  = ch
+            e.hl = hl
+        end
+    elseif e.hl then
+        pcall(function() e.hl:Destroy() end); e.hl = nil
+    end
+end
+
+-- ======================== AIM ================================
+local function pickTarget()
+    local best, bestD = nil, CFG.aim.fov
+    local c = Camera.ViewportSize / 2
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if isEnemy(plr) then
+            local ch, hum, hrp, head = getChar(plr)
+            if ch and distTo(plr) <= CFG.esp.maxDist then
+                local part = ch:FindFirstChild(CFG.aim.part) or head
+                local sp, on = w2s(part.Position)
+                if on and hasLOS(part) then
+                    local d = (Vector2.new(sp.X - c.X, sp.Y - c.Y)).Magnitude
+                    if d < bestD then bestD, best = d, part end
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function moveMouse(dx, dy)
+    if mousemoverel then
+        pcall(mousemoverel, math.floor(dx), math.floor(dy)); return true
+    elseif mousemoveabs then
+        local m = UIS:GetMouseLocation()
+        pcall(mousemoveabs, math.floor(m.X + dx), math.floor(m.Y + dy)); return true
+    end
+    return false
+end
+
+local function doAim()
+    local hold = (not CFG.aim.holdMode) or UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+    if not (AimOn and hold) then AimTarget = nil; return end
+
+    local part = pickTarget()
+    AimTarget = part
+    if not part then return end
+
+    local sp, on = w2s(part.Position)
+    if not on then return end
+
+    local c  = Camera.ViewportSize / 2
+    local dx = (sp.X - c.X) * CFG.aim.smooth
+    local dy = (sp.Y - c.Y) * CFG.aim.smooth
+
+    if CFG.aim.silent and moveMouse(dx, dy) then return end
+
+    local goal = CFrame.new(Camera.CFrame.Position, part.Position)
+    Camera.CFrame = Camera.CFrame:Lerp(goal, math.clamp(CFG.aim.smooth, 0.02, 1))
+end
+
+-- ======================== VISUALS + MENU =====================
+local FovCircle = newD("Circle", {
+    Thickness = 1, Filled = false, NumSides = 64,
+    Color = CFG.visual.fovColor, Visible = FovOn,
+})
+
+local M = CFG.menu
+local uiBg    = newD("Square", { Thickness = 1, Filled = true, Color = Color3.fromRGB(18,18,20), Transparency = 0.15, Position = Vector2.new(M.x, M.y), Size = Vector2.new(M.w, 200) })
+local uiTitle = newD("Text",   { Size = 15, Center = false, Outline = true, Color = Color3.fromRGB(255,255,255), Text = "bench // one", Position = Vector2.new(M.x + 8, M.y + 5) })
+local uiHint  = newD("Text",   { Size = 12, Center = false, Outline = true, Color = Color3.fromRGB(140,140,150), Text = "LMB toggle | drag title", Position = Vector2.new(M.x + 8, M.y + 24) })
+
+local Items = {
+    { name = "ESP",        get = function() return EspOn end,               set = function(v) EspOn = v end },
+    { name = "Chams",      get = function() return ChamsOn end,             set = function(v) ChamsOn = v end },
+    { name = "Silent Aim", get = function() return AimOn end,               set = function(v) AimOn = v end },
+    { name = "FOV Circle", get = function() return FovOn end,               set = function(v) FovOn = v end },
+    { name = "Tracer",     get = function() return CFG.esp.tracer end,      set = function(v) CFG.esp.tracer = v end },
+    { name = "Team Check", get = function() return CFG.esp.teamCheck end,   set = function(v) CFG.esp.teamCheck = v end },
+    { name = "Wall Check", get = function() return CFG.aim.wallCheck end,   set = function(v) CFG.aim.wallCheck = v end },
+    { name = "Box Fill",   get = function() return CFG.esp.fill end,        set = function(v) CFG.esp.fill = v end },
+}
+
+local uiItems = {}
+for i = 1, #Items do
+    uiItems[i] = newD("Text", {
+        Size = 13, Center = false, Outline = true,
+        Position = Vector2.new(M.x + 8, M.y + 44 + (i - 1) * 16),
+    })
+end
+
+local RowH  = 16
+local TopH  = 44
+local RowY  = function(i) return M.y + TopH + (i - 1) * RowH end
+local MenuH = function() return TopH + #Items * RowH + 6 end
+
+local function drawMenu()
+    uiBg.Visible    = M.open
+    uiTitle.Visible = M.open
+    uiHint.Visible  = M.open
+    uiBg.Position   = Vector2.new(M.x, M.y)
+    uiBg.Size       = Vector2.new(M.w, MenuH())
+    uiTitle.Position= Vector2.new(M.x + 8, M.y + 4)
+    uiHint.Position = Vector2.new(M.x + 8, M.y + 24)
+    for i, it in ipairs(Items) do
+        local t = uiItems[i]
+        t.Visible  = M.open
+        t.Position = Vector2.new(M.x + 8, RowY(i) - 2)
+        local on   = it.get()
+        t.Text  = (on and "[+] " or "[ ] ") .. it.name
+        t.Color = on and Color3.fromRGB(0, 255, 130) or Color3.fromRGB(200, 200, 205)
+    end
+end
+
+local dragging, dragOff = false, Vector2.new(0, 0)
+
+local function mousePos()
+    local m = UIS:GetMouseLocation()
+    return Vector2.new(m.X, m.Y - CFG.menu.yOffset)
+end
+
+UIS.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    local mp = mousePos()
+
+    if input.UserInputType == Enum.UserInputType.MouseButton1 and M.open then
+        if mp.X >= M.x and mp.X <= M.x + M.w and mp.Y >= M.y and mp.Y <= M.y + 26 then
+            dragging = true
+            dragOff  = Vector2.new(mp.X - M.x, mp.Y - M.y)
+            return
+        end
+        for i, it in ipairs(Items) do
+            local yTop = RowY(i) - 3
+            if mp.X >= M.x and mp.X <= M.x + M.w and mp.Y >= yTop and mp.Y <= yTop + RowH then
+                it.set(not it.get())
+                return
+            end
+        end
+    end
+
+    if input.KeyCode == CFG.aim.toggleKey then
+        AimOn = not AimOn
+    elseif input.KeyCode == Enum.KeyCode.F1 then
+        EspOn = not EspOn
+    elseif input.KeyCode == Enum.KeyCode.F2 then
+        ChamsOn = not ChamsOn
+    elseif input.KeyCode == Enum.KeyCode.F3 then
+        FovOn = not FovOn
+    elseif input.KeyCode == Enum.KeyCode.F4 then
+        M.open = not M.open
+    end
+end)
+
+UIS.InputChanged:Connect(function(input)
+    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local mp = mousePos()
+        M.x = mp.X - dragOff.X
+        M.y = mp.Y - dragOff.Y
+    end
+end)
+
+UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = false
+    end
+end)
+
+local function updateVisuals()
+    if FovCircle then
+        FovCircle.Visible  = FovOn
+        FovCircle.Position = Camera.ViewportSize / 2
+        FovCircle.Radius   = CFG.aim.fov
+        FovCircle.Color    = AimTarget and Color3.fromRGB(0, 255, 130) or CFG.visual.fovColor
+    end
+    drawMenu()
+end
+
+-- ======================== LIFECYCLE ==========================
+local function onAdded(plr)
+    if plr ~= LP then buildEsp(plr) end
+end
+local function onRemoved(plr) destroyEsp(plr) end
+
+for _, plr in ipairs(Players:GetPlayers()) do onAdded(plr) end
+Players.PlayerAdded:Connect(onAdded)
+Players.PlayerRemoving:Connect(onRemoved)
+
+Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    Camera = Workspace.CurrentCamera
+end)
+
+-- ======================== MAIN LOOP ==========================
+RunService.RenderStepped:Connect(function()
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LP then
+            local ok = pcall(updateEsp, plr)
+            if not ok then
+                pcall(destroyEsp, plr)
+                pcall(buildEsp, plr)
+            end
+        end
+    end
+    pcall(updateVisuals)
+    pcall(doAim)
+end)
+
+-- ======================== CLEANUP ============================
+local function cleanup()
+    for plr in pairs(Cache) do destroyEsp(plr) end
+    removeD(FovCircle); removeD(uiBg); removeD(uiTitle); removeD(uiHint)
+    for _, t in ipairs(uiItems) do removeD(t) end
+end
+
+LP.AncestryChanged:Connect(function(_, parent)
+    if not parent then cleanup() end
+end)
